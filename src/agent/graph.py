@@ -42,7 +42,7 @@ class OrderDraft:
     def missing_fields(self) -> list[str]:
         missing: list[str] = []
         if not self.customer_name:
-            missing.append("tên khách hàng")
+            missing.append("tên khách hàng hoặc tên công ty")
         if not self.customer_phone:
             missing.append("số điện thoại")
         if not self.customer_email:
@@ -225,10 +225,7 @@ def run_agent(
     if violates_policy(query):
         return AgentResult(
             query=query,
-            final_answer=(
-                "Mình không thể tạo hóa đơn giả, bỏ qua tồn kho/catalog/policy hoặc tự ép khuyến mãi. "
-                "Mình chỉ có thể tạo đơn hợp lệ theo catalog và discount từ hệ thống."
-            ),
+            final_answer=render_guardrail_answer(),
             tool_calls=[],
             provider=provider,
             model_name=model_name,
@@ -239,7 +236,7 @@ def run_agent(
     if missing:
         return AgentResult(
             query=query,
-            final_answer="Mình cần thêm " + ", ".join(missing) + " trước khi tạo đơn.",
+            final_answer=render_clarification_answer(missing),
             tool_calls=[],
             provider=provider,
             model_name=model_name,
@@ -262,7 +259,7 @@ def run_agent(
     if stock_errors:
         return AgentResult(
             query=query,
-            final_answer="Không thể lưu đơn vì " + "; ".join(stock_errors),
+            final_answer=render_stock_failure_answer(stock_errors),
             tool_calls=tool_calls,
             provider=provider,
             model_name=model_name,
@@ -293,7 +290,7 @@ def run_agent(
         errors = totals_payload.get("errors", ["không thể tính tổng đơn hàng."])
         return AgentResult(
             query=query,
-            final_answer="Không thể lưu đơn vì " + "; ".join(str(error) for error in errors),
+            final_answer=render_stock_failure_answer([str(error) for error in errors]),
             tool_calls=tool_calls,
             provider=provider,
             model_name=model_name,
@@ -328,18 +325,13 @@ def run_agent(
     if not saved_order:
         return AgentResult(
             query=query,
-            final_answer="Không thể xác nhận lưu đơn vì save_order chưa trả về saved_order hợp lệ.",
+            final_answer="Không thể xác nhận lưu đơn vì save_order chưa trả về saved_order hợp lệ. Đơn chưa được lưu.",
             tool_calls=tool_calls,
             provider=provider,
             model_name=model_name,
         )
 
-    pricing = saved_order["pricing"]
-    final_answer = (
-        f"Đã lưu đơn {saved_order['order_id']} với mã {saved_order['discount']['campaign_code']} "
-        f"giảm {int(pricing['discount_rate'] * 100)}%, tổng sau giảm {pricing['final_total']} VND. "
-        f"File: {saved_order['save_path']}."
-    )
+    final_answer = render_save_success_answer(saved_order)
     return AgentResult(
         query=query,
         final_answer=final_answer,
@@ -450,9 +442,27 @@ def extract_customer_name(query: str) -> str:
         if match:
             name = match.group(1).strip()
             name = re.sub(r"^(?:chị|anh|bạn)\s+", "", name, flags=re.IGNORECASE).strip()
-            if name and not name.lower().startswith(("tôi", "mình")):
+            if is_valid_customer_identity(name):
                 return name
     return ""
+
+
+def is_valid_customer_identity(name: str) -> bool:
+    normalized = normalize_ascii(name)
+    ambiguous_identities = {
+        "cong ty moi",
+        "khach moi",
+        "toi",
+        "minh",
+        "cho toi",
+        "cho minh",
+        "tui",
+    }
+    if not normalized:
+        return False
+    if normalized in ambiguous_identities:
+        return False
+    return not normalized.startswith(("toi ", "minh ", "tui "))
 
 
 def extract_shipping_address(query: str) -> str:
@@ -521,6 +531,37 @@ def find_stock_errors(items: list[OrderLineInput], store: OrderDataStore) -> lis
         if item.quantity > product.stock:
             errors.append(f"{product.name} chỉ còn {product.stock}, yêu cầu {item.quantity}")
     return errors
+
+
+def render_save_success_answer(saved_order: dict[str, Any]) -> str:
+    pricing = saved_order["pricing"]
+    discount = saved_order["discount"]
+    discount_percent = int(pricing["discount_rate"] * 100)
+    return (
+        "Đã kiểm tra catalog, tồn kho, khuyến mãi và tổng tiền; "
+        f"đơn {saved_order['order_id']} đã được lưu thành công. "
+        f"Mã khuyến mãi: {discount['campaign_code']} ({discount_percent}%). "
+        f"Tổng sau giảm: {pricing['final_total']} VND. "
+        f"File lưu: {saved_order['save_path']}."
+    )
+
+
+def render_clarification_answer(missing: list[str]) -> str:
+    return (
+        "Mình cần thêm " + ", ".join(missing) + " trước khi tạo đơn. "
+        "Đơn chưa được lưu."
+    )
+
+
+def render_stock_failure_answer(errors: list[str]) -> str:
+    return "Không thể lưu đơn vì " + "; ".join(errors) + ". Đơn chưa được lưu."
+
+
+def render_guardrail_answer() -> str:
+    return (
+        "Mình không thể hỗ trợ tạo hóa đơn giả, bỏ qua tồn kho, bỏ qua catalog/policy "
+        "hoặc ép giảm giá ngoài hệ thống. Đơn/hóa đơn chưa được lưu."
+    )
 
 
 def normalize_ascii(text: str) -> str:
