@@ -249,12 +249,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Grade saved JSON output for the order-agent lab")
     parser.add_argument("--module", default="solution.agent.graph")
     parser.add_argument("--cases", default=str(ROOT_DIR / "data" / "graded_cases.json"))
-    parser.add_argument("--provider", default="google", choices=["google", "ollama"])
+    parser.add_argument("--provider", default="openai", choices=["openai", "google", "ollama"])
     parser.add_argument("--model-name", default=None)
     parser.add_argument("--today", default="2026-06-01")
     parser.add_argument("--pass-threshold", type=float, default=80.0)
-    parser.add_argument("--judge-provider", default=None, choices=["google", "ollama"])
+    parser.add_argument("--judge-provider", default=None, choices=["openai", "google", "ollama"])
     parser.add_argument("--judge-model-name", default=None)
+    parser.add_argument("--skip-judge", action="store_true", help="Skip the LLM judge and score deterministic checks only.")
     args = parser.parse_args()
 
     module = importlib.import_module(args.module)
@@ -263,7 +264,9 @@ def main() -> int:
 
     cases = load_cases(Path(args.cases))
     effective_judge_provider = args.judge_provider
-    if effective_judge_provider is None and any(case["weights"].get("llm_judge", 0) > 0 for case in cases):
+    if args.skip_judge:
+        effective_judge_provider = None
+    elif effective_judge_provider is None and any(case["weights"].get("llm_judge", 0) > 0 for case in cases):
         effective_judge_provider = args.provider
 
     scores: list[CaseScore] = []
