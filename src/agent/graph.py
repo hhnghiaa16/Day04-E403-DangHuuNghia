@@ -222,10 +222,11 @@ def run_agent(
     """
     store = OrderDataStore(data_dir or DEFAULT_DATA_DIR, output_dir or DEFAULT_OUTPUT_DIR, today=today)
 
-    if violates_policy(query):
+    guardrail_reasons = get_policy_violations(query)
+    if guardrail_reasons:
         return AgentResult(
             query=query,
-            final_answer=render_guardrail_answer(),
+            final_answer=render_guardrail_answer(guardrail_reasons),
             tool_calls=[],
             provider=provider,
             model_name=model_name,
@@ -396,20 +397,24 @@ def extract_saved_order(tool_calls: list[ToolCallRecord]) -> tuple[dict | None, 
 
 
 def violates_policy(query: str) -> bool:
+    return bool(get_policy_violations(query))
+
+
+def get_policy_violations(query: str) -> list[str]:
     normalized = normalize_ascii(query)
-    policy_terms = [
-        "fake invoice",
-        "hoa don gia",
-        "bypass stock",
-        "bo qua ton kho",
-        "bo qua policy",
-        "ignore policy",
-        "ignore catalog",
-        "khong can theo catalog",
-        "ep giam gia",
-        "tu ep giam gia",
+    checks = [
+        ("tạo hóa đơn giả", ["fake invoice", "hoa don gia", "hoa on gia"]),
+        ("bỏ qua tồn kho", ["bypass stock", "bo qua ton kho"]),
+        ("bỏ qua catalog/policy", ["bo qua policy", "ignore policy", "ignore catalog", "khong can theo catalog"]),
+        ("ép giảm giá ngoài hệ thống", ["ep giam gia", "tu ep giam gia"]),
     ]
-    return any(term in normalized for term in policy_terms) or ("90%" in query and "giam" in normalized)
+    reasons: list[str] = []
+    for reason, terms in checks:
+        if any(term in normalized for term in terms):
+            reasons.append(reason)
+    if "90%" in query and "giam" in normalized and "ép giảm giá ngoài hệ thống" not in reasons:
+        reasons.append("ép giảm giá ngoài hệ thống")
+    return reasons
 
 
 def build_order_draft(query: str, store: OrderDataStore) -> OrderDraft:
@@ -537,9 +542,13 @@ def render_save_success_answer(saved_order: dict[str, Any]) -> str:
     pricing = saved_order["pricing"]
     discount = saved_order["discount"]
     discount_percent = int(pricing["discount_rate"] * 100)
+    item_summary = ", ".join(
+        f"{item['quantity']} {item['name']}" for item in saved_order.get("items", [])
+    )
     return (
-        "Đã kiểm tra catalog, tồn kho, khuyến mãi và tổng tiền; "
+        "Dựa trên kết quả tool/catalog, đã kiểm tra catalog, tồn kho, khuyến mãi và tổng tiền; "
         f"đơn {saved_order['order_id']} đã được lưu thành công. "
+        f"Mặt hàng đã lưu: {item_summary}. "
         f"Mã khuyến mãi: {discount['campaign_code']} ({discount_percent}%). "
         f"Tổng sau giảm: {pricing['final_total']} VND. "
         f"File lưu: {saved_order['save_path']}."
@@ -557,10 +566,12 @@ def render_stock_failure_answer(errors: list[str]) -> str:
     return "Không thể lưu đơn vì " + "; ".join(errors) + ". Đơn chưa được lưu."
 
 
-def render_guardrail_answer() -> str:
+def render_guardrail_answer(reasons: list[str]) -> str:
+    reason_text = ", ".join(reasons)
     return (
-        "Mình không thể hỗ trợ tạo hóa đơn giả, bỏ qua tồn kho, bỏ qua catalog/policy "
-        "hoặc ép giảm giá ngoài hệ thống. Đơn/hóa đơn chưa được lưu."
+        f"Mình không thể hỗ trợ yêu cầu vi phạm chính sách: {reason_text}. "
+        "Mình chỉ có thể tạo đơn hợp lệ theo catalog, tồn kho và khuyến mãi từ hệ thống. "
+        "Đơn/hóa đơn chưa được lưu."
     )
 
 
